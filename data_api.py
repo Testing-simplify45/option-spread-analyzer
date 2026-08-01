@@ -1,30 +1,20 @@
 """
 data_api.py
 ===========
-Single abstraction layer between the UI and the tick data API.
-
-Replace the body of each function with your actual API calls.
-The mock implementations return realistic synthetic data so the
-UI can be developed and tested without a live feed.
+Data layer — fetches live option data from Fyers API.
+Falls back to mock data if not authenticated.
 """
 
 from __future__ import annotations
 
 import random
-import math
-import time
 from datetime import date, datetime, timedelta
 from functools import lru_cache
 from typing import Optional
 
 import pandas as pd
 import numpy as np
-
-# ── Configuration ────────────────────────────────────────────────────────────
-# Set USE_MOCK = False and fill in API_BASE_URL / API_KEY to use live data.
-USE_MOCK = True
-API_BASE_URL = "https://your-api-endpoint.com"
-API_KEY = "your-api-key-here"
+import streamlit as st
 
 # ── Instrument master ────────────────────────────────────────────────────────
 EXCHANGES = ["NSE", "BSE"]
@@ -34,29 +24,42 @@ UNDERLYINGS = {
     "BSE": ["SENSEX", "BANKEX"],
 }
 
-# Approximate ATM levels (used for mock strike generation)
+# Fyers symbol prefixes
+_FYERS_EXCHANGE = {
+    "NSE": "NSE",
+    "BSE": "BSE",
+}
+
+_FYERS_UNDERLYING = {
+    "NIFTY":      "NIFTY",
+    "BANKNIFTY":  "BANKNIFTY",
+    "FINNIFTY":   "FINNIFTY",
+    "MIDCPNIFTY": "MIDCPNIFTY",
+    "SENSEX":     "SENSEX",
+    "BANKEX":     "BANKEX",
+}
+
+# Approximate ATM levels
 _ATM_APPROX = {
-    "NIFTY": 23300,
-    "BANKNIFTY": 52000,
-    "FINNIFTY": 23500,
+    "NIFTY":      23300,
+    "BANKNIFTY":  52000,
+    "FINNIFTY":   23500,
     "MIDCPNIFTY": 11500,
-    "SENSEX": 77000,
-    "BANKEX": 59000,
+    "SENSEX":     77000,
+    "BANKEX":     59000,
 }
 
 _STRIKE_GAP = {
-    "NIFTY": 50,
-    "BANKNIFTY": 100,
-    "FINNIFTY": 50,
+    "NIFTY":      50,
+    "BANKNIFTY":  100,
+    "FINNIFTY":   50,
     "MIDCPNIFTY": 25,
-    "SENSEX": 100,
-    "BANKEX": 100,
+    "SENSEX":     100,
+    "BANKEX":     100,
 }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Helper utilities
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Helpers ──────────────────────────────────────────────────────────────────
 
 def round_to_nearest(value: float, multiple: int) -> int:
     return int(round(value / multiple) * multiple)
@@ -72,136 +75,194 @@ def get_atm(underlying: str) -> int:
     return round_to_nearest(base, gap)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Instrument data
-# ─────────────────────────────────────────────────────────────────────────────
+def _build_fyers_symbol(exchange: str, underlying: str, expiry: str, strike: int, option_type: str) -> str:
+    """
+    Build Fyers option symbol.
+    Format: NSE:NIFTY25JAN23400CE
+    """
+    exp_date = datetime.strptime(expiry, "%Y-%m-%d")
+    # Weekly format: DDMMMYY  e.g. 23JAN25
+    exp_str = exp_date.strftime("%d%b%y").upper()
+    return f"{exchange}:{underlying}{exp_str}{strike}{option_type}"
+
+
+def _get_fyers():
+    """Get authenticated Fyers client from session."""
+    try:
+        from fyers_auth import get_fyers_client
+        return get_fyers_client()
+    except Exception:
+        return None
+
+
+# ── Expiries ─────────────────────────────────────────────────────────────────
 
 @lru_cache(maxsize=None)
 def get_expiries(exchange: str, underlying: str) -> list[str]:
     """Return available expiry dates as YYYY-MM-DD strings."""
-    if USE_MOCK:
+    fyers = _get_fyers()
+
+    if fyers is None:
+        # Mock expiries
         today = date.today()
         expiries = []
         d = today
         for _ in range(12):
-            # Next Thursday
             days_ahead = 3 - d.weekday()
             if days_ahead <= 0:
                 days_ahead += 7
             d = d + timedelta(days=days_ahead)
             expiries.append(d.isoformat())
         return expiries
-    else:
-        import requests
-        r = requests.get(
-            f"{API_BASE_URL}/instruments/expiries",
-            params={"exchange": exchange, "underlying": underlying},
-            headers={"x-api-key": API_KEY},
-            timeout=5,
-        )
-        return r.json()["expiries"]
+
+    try:
+        # Fetch from Fyers option chain
+        symbol_map = {"NIFTY": "NSE:NIFTY50-INDEX", "BANKNIFTY": "NSE:NIFTYBANK-INDEX",
+                      "SENSEX": "BSE:SENSEX-INDEX", "BANKEX": "BSE:BANKEX-INDEX",
+                      "FINNIFTY": "NSE:FINNIFTY-INDEX", "MIDCPNIFTY": "NSE:MIDCPNIFTY-INDEX"}
+        idx_symbol = symbol_map.get(underlying, f"{exchange}:{underlying}-INDEX")
+
+        data = {"symbol": idx_symbol, "strikecount": 1, "timestamp": ""}
+        response = fyers.optionchain(data=data)
+
+        if response.get("s") == "ok":
+            expiry_list = response["data"]["expiryData"]
+            dates = []
+            for e in expiry_list:
+                ts = e.get("expiry", 0)
+                d = datetime.fromtimestamp(ts).date()
+                dates.append(d.isoformat())
+            return sorted(dates)
+    except Exception as e:
+        pass
+
+    # Fallback to mock
+    today = date.today()
+    expiries = []
+    d = today
+    for _ in range(12):
+        days_ahead = 3 - d.weekday()
+        if days_ahead <= 0:
+            days_ahead += 7
+        d = d + timedelta(days=days_ahead)
+        expiries.append(d.isoformat())
+    return expiries
 
 
 @lru_cache(maxsize=None)
 def get_strikes(exchange: str, underlying: str, expiry: str) -> list[int]:
     """Return sorted list of available strikes."""
-    if USE_MOCK:
+    fyers = _get_fyers()
+
+    if fyers is None:
         atm = get_atm(underlying)
         gap = _STRIKE_GAP.get(underlying, 50)
         return [atm + (i - 10) * gap for i in range(21)]
-    else:
-        import requests
-        r = requests.get(
-            f"{API_BASE_URL}/instruments/strikes",
-            params={"exchange": exchange, "underlying": underlying, "expiry": expiry},
-            headers={"x-api-key": API_KEY},
-            timeout=5,
-        )
-        return sorted(r.json()["strikes"])
+
+    try:
+        symbol_map = {"NIFTY": "NSE:NIFTY50-INDEX", "BANKNIFTY": "NSE:NIFTYBANK-INDEX",
+                      "SENSEX": "BSE:SENSEX-INDEX", "BANKEX": "BSE:BANKEX-INDEX",
+                      "FINNIFTY": "NSE:FINNIFTY-INDEX", "MIDCPNIFTY": "NSE:MIDCPNIFTY-INDEX"}
+        idx_symbol = symbol_map.get(underlying, f"{exchange}:{underlying}-INDEX")
+
+        exp_date = datetime.strptime(expiry, "%Y-%m-%d")
+        exp_ts = int(exp_date.timestamp())
+
+        data = {"symbol": idx_symbol, "strikecount": 20, "timestamp": str(exp_ts)}
+        response = fyers.optionchain(data=data)
+
+        if response.get("s") == "ok":
+            options = response["data"]["optionsChain"]
+            strikes = sorted(set(int(o["strikePrice"]) for o in options))
+            return strikes
+    except Exception:
+        pass
+
+    atm = get_atm(underlying)
+    gap = _STRIKE_GAP.get(underlying, 50)
+    return [atm + (i - 10) * gap for i in range(21)]
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Live price
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Live Price ────────────────────────────────────────────────────────────────
 
-def get_ltp(
-    exchange: str,
-    underlying: str,
-    expiry: str,
-    strike: int,
-    option_type: str,
-) -> Optional[float]:
-    """
-    Return the last traded price for a single option contract.
-    Returns None if the contract is not found or the market is closed.
-    """
-    if USE_MOCK:
-        # Simulate a Black-Scholes-like price based on moneyness
+def get_ltp(exchange: str, underlying: str, expiry: str, strike: int, option_type: str) -> Optional[float]:
+    """Return the last traded price for a single option contract."""
+    fyers = _get_fyers()
+
+    if fyers is None:
+        # Mock price
         atm = _ATM_APPROX.get(underlying, 25000)
-        iv = 0.15
-        T = 0.02  # ~5 trading days
-        dist = (atm - strike) / atm
-        if option_type == "CE":
-            raw = atm * 0.01 * max(0.05, 1 - abs(dist) * 3)
-        else:
-            raw = atm * 0.01 * max(0.05, 1 - abs(dist) * 3)
+        dist = abs(atm - strike) / atm
+        raw = atm * 0.01 * max(0.05, 1 - dist * 3)
         noise = raw * 0.02 * (random.random() - 0.5)
         return round(max(0.05, raw + noise), 2)
-    else:
-        import requests
-        r = requests.get(
-            f"{API_BASE_URL}/ltp",
-            params={
-                "exchange": exchange,
-                "underlying": underlying,
-                "expiry": expiry,
-                "strike": strike,
-                "option_type": option_type,
-            },
-            headers={"x-api-key": API_KEY},
-            timeout=3,
-        )
-        data = r.json()
-        return data.get("ltp")
+
+    try:
+        symbol = _build_fyers_symbol(exchange, underlying, expiry, strike, option_type)
+        data = {"symbols": symbol}
+        response = fyers.quotes(data=data)
+
+        if response.get("s") == "ok":
+            ltp = response["d"][0]["v"]["lp"]
+            return float(ltp)
+    except Exception:
+        pass
+
+    return None
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Historical tick data
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Historical Data ───────────────────────────────────────────────────────────
 
 def get_spread_history(
-    exchange1: str, underlying1: str, expiry1: str, strike1: int, type1: str,
-    exchange2: str, underlying2: str, expiry2: str, strike2: int, type2: str,
+    exchange1, underlying1, expiry1, strike1, type1,
+    exchange2, underlying2, expiry2, strike2, type2,
     trade_date: date,
     ratio: float = 1.0,
 ) -> pd.DataFrame:
-    """
-    Return tick-by-tick spread data for the given date.
+    """Return tick-by-tick spread data for the given date."""
+    fyers = _get_fyers()
 
-    Columns: timestamp (datetime), leg1_price, leg2_price, spread
-    spread = leg1_price - (leg2_price * ratio)
-    """
-    if USE_MOCK:
+    if fyers is None:
         return _mock_spread_history(trade_date, ratio)
-    else:
-        import requests
-        r = requests.get(
-            f"{API_BASE_URL}/spread/history",
-            params={
-                "exchange1": exchange1, "underlying1": underlying1,
-                "expiry1": expiry1, "strike1": strike1, "type1": type1,
-                "exchange2": exchange2, "underlying2": underlying2,
-                "expiry2": expiry2, "strike2": strike2, "type2": type2,
-                "date": trade_date.isoformat(),
-                "ratio": ratio,
-            },
-            headers={"x-api-key": API_KEY},
-            timeout=10,
-        )
-        rows = r.json()["ticks"]
-        df = pd.DataFrame(rows)
-        df["timestamp"] = pd.to_datetime(df["timestamp"])
-        return df
+
+    try:
+        sym1 = _build_fyers_symbol(exchange1, underlying1, expiry1, strike1, type1)
+        sym2 = _build_fyers_symbol(exchange2, underlying2, expiry2, strike2, type2)
+
+        date_str = trade_date.strftime("%Y-%m-%d")
+
+        def fetch_candles(symbol):
+            data = {
+                "symbol": symbol,
+                "resolution": "1",   # 1 minute candles
+                "date_format": "1",
+                "range_from": date_str,
+                "range_to": date_str,
+                "cont_flag": "1",
+            }
+            resp = fyers.history(data=data)
+            if resp.get("s") == "ok":
+                candles = resp["candles"]
+                df = pd.DataFrame(candles, columns=["timestamp", "open", "high", "low", "close", "volume"])
+                df["timestamp"] = pd.to_datetime(df["timestamp"], unit="s")
+                df = df.set_index("timestamp")
+                return df["close"]
+            return pd.Series(dtype=float)
+
+        leg1 = fetch_candles(sym1)
+        leg2 = fetch_candles(sym2)
+
+        if leg1.empty or leg2.empty:
+            return _mock_spread_history(trade_date, ratio)
+
+        combined = pd.DataFrame({"leg1_price": leg1, "leg2_price": leg2}).dropna()
+        combined["spread"] = combined["leg1_price"] - combined["leg2_price"] * ratio
+        combined = combined.reset_index()
+        combined.columns = ["timestamp", "leg1_price", "leg2_price", "spread"]
+        return combined
+
+    except Exception as e:
+        return _mock_spread_history(trade_date, ratio)
 
 
 def _mock_spread_history(trade_date: date, ratio: float = 1.0) -> pd.DataFrame:
@@ -209,25 +270,22 @@ def _mock_spread_history(trade_date: date, ratio: float = 1.0) -> pd.DataFrame:
     open_time = datetime.combine(trade_date, datetime.strptime("09:15", "%H:%M").time())
     close_time = datetime.combine(trade_date, datetime.strptime("15:30", "%H:%M").time())
 
-    # Generate 1-second ticks
     timestamps = []
     t = open_time
     while t <= close_time:
         timestamps.append(t)
-        t += timedelta(seconds=1)
+        t += timedelta(seconds=60)
 
     n = len(timestamps)
     seed = int(trade_date.strftime("%Y%m%d"))
     rng = np.random.default_rng(seed)
 
-    # Leg 1 price random walk
     leg1_start = 80 + rng.uniform(-20, 40)
     leg1_vol = 0.003
     leg1_prices = [leg1_start]
     for _ in range(n - 1):
         leg1_prices.append(max(0.5, leg1_prices[-1] * (1 + rng.normal(0, leg1_vol))))
 
-    # Leg 2 correlated
     leg2_start = 25 + rng.uniform(-5, 15)
     leg2_vol = 0.004
     leg2_prices = [leg2_start]
@@ -239,24 +297,17 @@ def _mock_spread_history(trade_date: date, ratio: float = 1.0) -> pd.DataFrame:
     leg2 = np.array(leg2_prices)
     spread = leg1 - (leg2 * ratio)
 
-    df = pd.DataFrame({
+    return pd.DataFrame({
         "timestamp": timestamps,
         "leg1_price": np.round(leg1, 2),
         "leg2_price": np.round(leg2, 2),
         "spread": np.round(spread, 2),
     })
-    return df
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# OHLC helpers
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Resampling & Stats ────────────────────────────────────────────────────────
 
 def resample_spread(df: pd.DataFrame, resolution: str) -> pd.DataFrame:
-    """
-    Resample tick data to the desired time resolution.
-    resolution: 'Tick' | '30s' | '1min' | '5min' | '15min'
-    """
     if df.empty:
         return df
 
@@ -265,8 +316,8 @@ def resample_spread(df: pd.DataFrame, resolution: str) -> pd.DataFrame:
 
     freq_map = {
         "30 Seconds": "30s",
-        "1 Minute": "1min",
-        "5 Minutes": "5min",
+        "1 Minute":   "1min",
+        "5 Minutes":  "5min",
         "15 Minutes": "15min",
     }
     freq = freq_map.get(resolution, "1min")
@@ -275,22 +326,20 @@ def resample_spread(df: pd.DataFrame, resolution: str) -> pd.DataFrame:
     ohlc = df2["spread"].resample(freq).agg(["first", "max", "min", "last"])
     ohlc.columns = ["open", "high", "low", "close"]
     ohlc = ohlc.dropna().reset_index()
-    ohlc.rename(columns={"timestamp": "timestamp"}, inplace=True)
     return ohlc
 
 
 def compute_day_stats(df: pd.DataFrame) -> dict:
-    """Return open, high, low, current (last) spread and their timestamps."""
     if df.empty:
         return {"open": None, "high": None, "low": None, "current": None,
                 "high_time": None, "low_time": None}
 
     series = df["spread"]
     return {
-        "open": round(float(series.iloc[0]), 2),
-        "high": round(float(series.max()), 2),
-        "low": round(float(series.min()), 2),
-        "current": round(float(series.iloc[-1]), 2),
+        "open":      round(float(series.iloc[0]), 2),
+        "high":      round(float(series.max()), 2),
+        "low":       round(float(series.min()), 2),
+        "current":   round(float(series.iloc[-1]), 2),
         "high_time": df.loc[series.idxmax(), "timestamp"],
-        "low_time": df.loc[series.idxmin(), "timestamp"],
+        "low_time":  df.loc[series.idxmin(), "timestamp"],
     }
