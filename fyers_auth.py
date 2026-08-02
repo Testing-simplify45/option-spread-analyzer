@@ -251,7 +251,7 @@ def _render_login_component(auth_url: str, app_url: str):
       <span class="title">Option Spread Analyzer</span>
     </div>
 
-    <a href="{auth_url}" target="_parent" class="btn-blue">
+    <a href="{auth_url}" target="_top" class="btn-blue">
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" style="opacity:.85">
         <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8z" fill="currentColor"/>
         <circle cx="12" cy="12" r="5" fill="currentColor"/>
@@ -303,10 +303,10 @@ def _render_login_component(auth_url: str, app_url: str):
   function doLogin(){{
     const code=document.getElementById('authInput').value.trim();
     if(!code||code.length<10){{alert('Please paste your auth code first!');return;}}
-    window.parent.location.href='{app_url}?auth_code='+encodeURIComponent(code);
+    window.top.location.href='{app_url}?auth_code='+encodeURIComponent(code);
   }}
   function goGenerate(){{
-    window.parent.location.href='{app_url}?auth_page=generate';
+    window.top.location.href='{app_url}?auth_page=generate';
   }}
 </script>
 </body>
@@ -467,7 +467,7 @@ def _render_generate_component(auth_url: str, app_url: str):
     }});
   }}
   function goBack(){{
-    window.parent.location.href='{app_url}';
+    window.top.location.href='{app_url}';
   }}
 </script>
 </body>
