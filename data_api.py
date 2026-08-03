@@ -264,12 +264,19 @@ def _fetch_candles(fyers, symbol: str, trade_date: date) -> pd.Series:
     resp = fyers.history(data=data)
     if resp.get("s") == "ok":
         candles = resp["candles"]
+        if not candles:
+            import streamlit as st
+            st.warning(f"Empty candles for {symbol} on {trade_date}")
+            return pd.Series(dtype=float)
         df = pd.DataFrame(
             candles, columns=["timestamp", "open", "high", "low", "close", "volume"]
         )
         df["timestamp"] = pd.to_datetime(df["timestamp"], unit="s")
         df = df.set_index("timestamp")
         return df["close"]
+    else:
+        import streamlit as st
+        st.warning(f"Candle fetch failed for {symbol}: {resp.get('message', resp)}")
     return pd.Series(dtype=float)
 
 
