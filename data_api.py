@@ -95,15 +95,22 @@ def _build_fyers_symbol(
 ) -> str:
     """
     Build Fyers option symbol.
-    NSE format : NSE:NIFTY25AUG2323300CE
-    BSE format : BSE:SENSEX25AUG2577000CE
+    
+    Fyers v3 format examples:
+      Weekly NSE : NSE:NIFTY2580723300CE   → YY + M(1 char if single digit month) + DD + strike
+      Weekly BSE : BSE:SENSEX2580777000CE
+      Monthly    : NSE:NIFTY25AUG23300CE   (last Thursday of month uses MMM)
+
+    Safe universal format that Fyers accepts:
+      NSE:NIFTY25807XXCE  where 25=YY, 8=month, 07=day
     """
     exp_date = datetime.strptime(expiry, "%Y-%m-%d")
-    # Fyers uses format: DDMMMYY  e.g. 07AUG25
-    exp_str = exp_date.strftime("%d%b%y").upper()
-    ex = _OPTION_EXCHANGE.get(exchange, exchange)
+    yy  = exp_date.strftime("%y")       # e.g. "25"
+    mm  = str(exp_date.month)           # e.g. "8" (no leading zero)
+    dd  = exp_date.strftime("%d")       # e.g. "07"
+    ex  = _OPTION_EXCHANGE.get(exchange, exchange)
     und = _OPTION_UNDERLYING.get(underlying, underlying)
-    return f"{ex}:{und}{exp_str}{strike}{option_type}"
+    return f"{ex}:{und}{yy}{mm}{dd}{strike}{option_type}"
 
 
 def _get_fyers():
