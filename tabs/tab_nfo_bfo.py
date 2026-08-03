@@ -298,8 +298,8 @@ def render_tab():
 
         with r1c3:
             st.markdown("**Parameters**")
-            ratio = st.number_input("Ratio", value=_DEFAULT_RATIO, step=0.1, format="%.2f", key="nfo_ratio")
-            multiplier = st.number_input("Multiplier", value=_DEFAULT_MULTIPLIER, step=0.1, format="%.2f", key="nfo_mult")
+            ratio = st.number_input("Ratio", value=_DEFAULT_RATIO, step=0.01, format="%.4f", key="nfo_ratio")
+            multiplier = st.number_input("Multiplier", value=_DEFAULT_MULTIPLIER, step=0.01, format="%.4f", key="nfo_mult")
 
         with r1c4:
             st.markdown("**Strike Ladder**")
