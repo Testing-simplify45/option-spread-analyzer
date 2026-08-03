@@ -152,7 +152,8 @@ def get_expiries(exchange: str, underlying: str) -> list[str]:
             dates = []
             for e in expiry_list:
                 ts = e.get("expiry", 0)
-                d = datetime.fromtimestamp(ts).date()
+                # ts may come as int or string — handle both
+                d = datetime.fromtimestamp(int(ts)).date()
                 dates.append(d.isoformat())
             return sorted(dates)
         else:
@@ -222,14 +223,20 @@ def get_ltp(
         response = fyers.quotes(data={"symbols": symbol})
 
         if response.get("s") == "ok":
-            ltp = response["d"][0]["v"]["lp"]
-            return float(ltp)
+            d = response["d"][0]
+            # Fyers v3 returns data inside "v" dict
+            if isinstance(d, dict):
+                v = d.get("v", d)  # fallback to d itself if no "v" key
+                # Try different field names for LTP
+                ltp = v.get("lp") or v.get("last_price") or v.get("close_price") or v.get("cmd", {}).get("lp")
+                if ltp is not None:
+                    return float(ltp)
+            st.warning(f"LTP: unexpected response format for {symbol}: {d}")
         else:
-            # Try alternate symbol format (some BSE symbols differ)
-            st.warning(f"LTP fetch failed for {symbol}: {response.get('message', '')}")
+            st.warning(f"LTP fetch failed for {symbol}: {response.get('message', '')} | Full: {response}")
 
     except Exception as ex:
-        st.warning(f"LTP error: {ex}")
+        st.warning(f"LTP error for {symbol}: {ex}")
 
     return None
 
