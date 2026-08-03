@@ -75,7 +75,6 @@ def _second_strike(first: int, multiplier: float) -> int:
 
 # ── Fetch spread stats for one row ───────────────────────────────────────────
 
-@st.cache_data(ttl=30, show_spinner=False)
 def _fetch_row_stats(
     ex1, und1, exp1, stk1, otype,
     ex2, und2, exp2, stk2,
@@ -260,7 +259,9 @@ def _render_table_section(
                     f"{und1} {stk1} vs {und2} {stk2}  ·  {option_type}  ·  "
                     f"{trade_date.strftime('%d %b %Y')}"
                 )
-                fig = build_spread_line_chart(df, title=chart_title, stats=stats, resolution="Tick")
+                # Only pass timestamp + spread columns to chart
+                df_chart = df[["timestamp", "spread"]].copy() if not df.empty else df
+                fig = build_spread_line_chart(df_chart, title=chart_title, stats=stats, resolution="Tick")
                 st.plotly_chart(fig, use_container_width=True, config={"scrollZoom": True})
 
         # Thin row divider
