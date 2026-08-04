@@ -188,10 +188,13 @@ def get_strikes(exchange: str, underlying: str, expiry: str) -> list[int]:
         if not idx_symbol:
             raise ValueError(f"Unknown underlying: {underlying}")
 
+        # Fyers expects timestamp as integer seconds since epoch
         exp_date = datetime.strptime(expiry, "%Y-%m-%d")
-        exp_ts = int(exp_date.timestamp())
+        # Use noon time to avoid timezone edge cases
+        exp_dt = exp_date.replace(hour=12, minute=0, second=0)
+        exp_ts = int(exp_dt.timestamp())
 
-        data = {"symbol": idx_symbol, "strikecount": 20, "timestamp": str(exp_ts)}
+        data = {"symbol": idx_symbol, "strikecount": 20, "timestamp": exp_ts}
         response = fyers.optionchain(data=data)
 
         if response.get("s") == "ok":
