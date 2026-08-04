@@ -84,18 +84,34 @@ def _fetch_row_stats(
     ltp2 = get_ltp(ex2, und2, exp2, stk2, otype)
 
     if ltp1 is None or ltp2 is None:
-        return None, None, None, ltp1, ltp2
+        return None, None, None, None, ltp1, ltp2
 
     current = round(ltp1 - ltp2 * ratio, 2)
 
-    # Day high/low from history
+    # Today's high/low
     df = get_spread_history(
         ex1, und1, exp1, stk1, otype,
         ex2, und2, exp2, stk2, otype,
         trade_date, ratio=ratio,
     )
     stats = compute_day_stats(df)
-    return current, stats.get("high"), stats.get("low"), ltp1, ltp2
+
+    # Previous day close
+    prev_date = trade_date - timedelta(days=1)
+    # Skip weekends
+    while prev_date.weekday() >= 5:
+        prev_date -= timedelta(days=1)
+
+    df_prev = get_spread_history(
+        ex1, und1, exp1, stk1, otype,
+        ex2, und2, exp2, stk2, otype,
+        prev_date, ratio=ratio,
+    )
+    prev_close = None
+    if not df_prev.empty:
+        prev_close = round(float(df_prev["spread"].iloc[-1]), 2)
+
+    return current, stats.get("high"), stats.get("low"), prev_close, ltp1, ltp2
 
 
 # ── Table renderer ────────────────────────────────────────────────────────────
@@ -126,9 +142,9 @@ def _render_table_section(
           <th style="text-align:left">First Strike</th>
           <th>Second Strike</th>
           <th>Current Spread</th>
-          <th>—</th>
           <th>Day High</th>
           <th>Day Low</th>
+          <th>Prev Close</th>
           <th></th>
         </tr>
       </thead>
@@ -142,13 +158,13 @@ def _render_table_section(
         stk2 = _second_strike(stk1, multiplier)
         row_key = f"{section_key}_{option_type}_{i}"
 
-        current, high, low, ltp1, ltp2 = _fetch_row_stats(
+        current, high, low, prev_close, ltp1, ltp2 = _fetch_row_stats(
             ex1, und1, exp1, stk1, option_type,
             ex2, und2, exp2, stk2,
             ratio, trade_date,
         )
 
-        c1, c2, c3, c4, c5, c6, c7 = st.columns([2, 2, 2, 1, 2, 2, 2])
+        c1, c2, c3, c4, c5, c6, c7, c8 = st.columns([2, 2, 2, 2, 2, 2, 2, 2])
 
         with c1:
             st.markdown(
@@ -174,24 +190,25 @@ def _render_table_section(
             )
         with c4:
             st.markdown(
-                "<div style='padding:6px 4px;color:#30363d;font-size:0.8rem'>—</div>",
+                f"<div style='font-family:JetBrains Mono,monospace;font-size:0.9rem;"
+                f"padding:6px 4px;color:#3fb950'>{_fmt_spread(high)}</div>",
                 unsafe_allow_html=True,
             )
         with c5:
             st.markdown(
                 f"<div style='font-family:JetBrains Mono,monospace;font-size:0.9rem;"
-                f"padding:6px 4px;color:#3fb950'>{_fmt_spread(high)}</div>",
+                f"padding:6px 4px;color:#f85149'>{_fmt_spread(low)}</div>",
                 unsafe_allow_html=True,
             )
         with c6:
+            # Prev close — amber color
             st.markdown(
                 f"<div style='font-family:JetBrains Mono,monospace;font-size:0.9rem;"
-                f"padding:6px 4px;color:#f85149'>{_fmt_spread(low)}</div>",
+                f"padding:6px 4px;color:#d29922'>{_fmt_spread(prev_close)}</div>",
                 unsafe_allow_html=True,
             )
         with c7:
             if st.button("📈 View Chart", key=f"btn_{row_key}"):
-                # Toggle chart state
                 toggle_key = f"chart_open_{row_key}"
                 st.session_state[toggle_key] = not st.session_state.get(toggle_key, False)
 
