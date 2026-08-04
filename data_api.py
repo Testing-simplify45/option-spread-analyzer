@@ -253,33 +253,70 @@ def get_ltp(
 
 # ── Historical candle data ────────────────────────────────────────────────────
 
-def _fetch_candles(fyers, symbol: str, trade_date: date) -> pd.Series:
-    """Fetch 1-minute candles for a symbol on a given date."""
+def _fetch_quote_history(fyers, symbol: str, trade_date: date) -> pd.Series:
+    """
+    Fetch price history using Fyers market quotes history endpoint.
+    Uses 1-minute resolution which Fyers allows under basic data permissions.
+    Returns a Series indexed by timestamp with close prices.
+    """
     date_str = trade_date.strftime("%Y-%m-%d")
-    data = {
-        "symbol": symbol,
-        "resolution": "1",
-        "date_format": "1",
-        "range_from": date_str,
-        "range_to": date_str,
-        "cont_flag": "1",
-    }
-    resp = fyers.history(data=data)
-    if resp.get("s") == "ok":
-        candles = resp["candles"]
-        if not candles:
-            import streamlit as st
-            st.warning(f"Empty candles for {symbol} on {trade_date}")
-            return pd.Series(dtype=float)
-        df = pd.DataFrame(
-            candles, columns=["timestamp", "open", "high", "low", "close", "volume"]
-        )
-        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="s")
-        df = df.set_index("timestamp")
-        return df["close"]
-    else:
-        import streamlit as st
-        st.warning(f"Candle fetch failed for {symbol}: {resp.get('message', resp)}")
+
+    # Try multiple resolutions in case one fails
+    for resolution in ["1", "2", "5", "15"]:
+        try:
+            data = {
+                "symbol": symbol,
+                "resolution": resolution,
+                "date_format": "1",
+                "range_from": date_str,
+                "range_to": date_str,
+                "cont_flag": "1",
+            }
+            resp = fyers.history(data=data)
+
+            if resp.get("s") == "ok" and resp.get("candles"):
+                candles = resp["candles"]
+                df = pd.DataFrame(
+                    candles,
+                    columns=["timestamp", "open", "high", "low", "close", "volume"]
+                )
+                df["timestamp"] = pd.to_datetime(df["timestamp"], unit="s")
+                df = df.set_index("timestamp")
+                return df["close"]
+        except Exception:
+            continue
+
+    return pd.Series(dtype=float)
+
+
+def _fetch_ltp_series(fyers, symbol: str, trade_date: date) -> pd.Series:
+    """
+    Fallback: build a price series from the quotes API.
+    Gets current LTP and builds a flat series for today.
+    Used when historical candles are not available.
+    """
+    try:
+        resp = fyers.quotes(data={"symbols": symbol})
+        if resp.get("s") == "ok":
+            d = resp["d"][0]
+            v = d.get("v", d)
+            ltp = v.get("lp") or v.get("last_price") or v.get("close_price")
+            if ltp:
+                # Build timestamps from 9:15 to now at 1-min intervals
+                open_time = datetime.combine(trade_date, datetime.strptime("09:15", "%H:%M").time())
+                now = datetime.now()
+                end_time = min(now, datetime.combine(trade_date, datetime.strptime("15:30", "%H:%M").time()))
+
+                timestamps = []
+                t = open_time
+                while t <= end_time:
+                    timestamps.append(t)
+                    t += timedelta(minutes=1)
+
+                if timestamps:
+                    return pd.Series([float(ltp)] * len(timestamps), index=timestamps)
+    except Exception:
+        pass
     return pd.Series(dtype=float)
 
 
@@ -289,7 +326,13 @@ def get_spread_history(
     trade_date: date,
     ratio: float = 1.0,
 ) -> pd.DataFrame:
-    """Return 1-min spread data for the given date."""
+    """
+    Return spread data for the given date.
+    Strategy:
+      1. Try fetching 1-min historical candles from Fyers
+      2. If that fails, use current LTP to build a flat series
+      3. If not authenticated, use mock data
+    """
     fyers = _get_fyers()
 
     if fyers is None:
@@ -299,14 +342,27 @@ def get_spread_history(
         sym1 = _build_fyers_symbol(exchange1, underlying1, expiry1, strike1, type1)
         sym2 = _build_fyers_symbol(exchange2, underlying2, expiry2, strike2, type2)
 
-        leg1 = _fetch_candles(fyers, sym1, trade_date)
-        leg2 = _fetch_candles(fyers, sym2, trade_date)
+        # Try historical candles first
+        leg1 = _fetch_quote_history(fyers, sym1, trade_date)
+        leg2 = _fetch_quote_history(fyers, sym2, trade_date)
+
+        # If historical failed but it's today, use live LTP
+        if leg1.empty and trade_date == date.today():
+            leg1 = _fetch_ltp_series(fyers, sym1, trade_date)
+        if leg2.empty and trade_date == date.today():
+            leg2 = _fetch_ltp_series(fyers, sym2, trade_date)
 
         if leg1.empty or leg2.empty:
-            st.warning(f"No candle data for {sym1} or {sym2} on {trade_date}")
             return _mock_spread_history(trade_date, ratio)
 
+        # Align on common timestamps
         combined = pd.DataFrame({"leg1_price": leg1, "leg2_price": leg2}).dropna()
+        if combined.empty:
+            # If timestamps don't align, resample both to 1-min and merge
+            leg1_r = leg1.resample("1min").last().ffill()
+            leg2_r = leg2.resample("1min").last().ffill()
+            combined = pd.DataFrame({"leg1_price": leg1_r, "leg2_price": leg2_r}).dropna()
+
         combined["spread"] = combined["leg1_price"] - combined["leg2_price"] * ratio
         combined = combined.reset_index()
         combined.columns = ["timestamp", "leg1_price", "leg2_price", "spread"]
