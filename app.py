@@ -70,7 +70,7 @@ with col_logout:
 st.markdown("---")
 
 # ── Main tabs ─────────────────────────────────────────────────────────────────
-tab1, tab2 = st.tabs(["📊  Spread Analysis", "⚡  NFO-BFO Spread"])
+tab1, tab2, tab3 = st.tabs(["📊  Spread Analysis", "⚡  NFO-BFO Spread", "🧪  Test"])
 
 with tab1:
     from tabs.tab_spread_analysis import render_tab
@@ -79,3 +79,7 @@ with tab1:
 with tab2:
     from tabs.tab_nfo_bfo import render_tab as render_tab2
     render_tab2()
+
+with tab3:
+    from tabs.tab_test import render_tab as render_tab3
+    render_tab3()
