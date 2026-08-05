@@ -13,6 +13,7 @@ import plotly.graph_objects as go
 from data_api import (
     EXCHANGES, UNDERLYINGS, get_expiries, get_strikes,
     _build_fyers_symbol, _get_fyers, get_expiry_code,
+    get_atm, _STRIKE_GAP,
 )
 
 
@@ -85,8 +86,8 @@ def render_tab():
     with c3:
         l1_exp = st.selectbox("Expiry",      get_expiries(l1_ex, l1_und), key="t_l1_exp")
     with c4:
-        l1_stk = st.selectbox("Strike",      get_strikes(l1_ex, l1_und, l1_exp),
-                               index=len(get_strikes(l1_ex, l1_und, l1_exp))//2, key="t_l1_stk")
+        l1_stk = st.number_input("Strike", value=get_atm(l1_und),
+                                  step=_STRIKE_GAP.get(l1_und, 50), key="t_l1_stk")
     with c5:
         l1_typ = st.selectbox("Type", ["CE","PE"], key="t_l1_typ")
 
@@ -100,8 +101,8 @@ def render_tab():
     with d3:
         l2_exp = st.selectbox("Expiry",      get_expiries(l2_ex, l2_und), key="t_l2_exp")
     with d4:
-        l2_stk = st.selectbox("Strike",      get_strikes(l2_ex, l2_und, l2_exp),
-                               index=len(get_strikes(l2_ex, l2_und, l2_exp))//2, key="t_l2_stk")
+        l2_stk = st.number_input("Strike", value=get_atm(l2_und),
+                                  step=_STRIKE_GAP.get(l2_und, 50), key="t_l2_stk")
     with d5:
         l2_typ = st.selectbox("Type", ["CE","PE"], key="t_l2_typ")
 
