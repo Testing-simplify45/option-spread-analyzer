@@ -247,10 +247,6 @@ def get_ltp_batch_symbols(symbols: list[str]) -> dict[str, float]:
 
 def _fetch_candles(fyers, symbol: str, trade_date: date,
                    resolution: str = "1") -> pd.DataFrame:
-    """
-    Fetch OHLCV candles. Returns DataFrame indexed by IST datetime.
-    Columns: open, high, low, close, volume
-    """
     date_str = trade_date.strftime("%Y-%m-%d")
     try:
         resp = fyers.history(data={
@@ -262,20 +258,23 @@ def _fetch_candles(fyers, symbol: str, trade_date: date,
             "cont_flag":  "1",
         })
         if resp.get("s") == "ok" and resp.get("candles"):
-            df = pd.DataFrame(
-                resp["candles"],
-                columns=["timestamp","open","high","low","close","volume"]
-            )
-            # Convert to IST (same as working app)
+            raw = resp["candles"]
+            # Fyers sometimes returns 6 or 7 columns — handle both
+            n_cols = len(raw[0]) if raw else 6
+            if n_cols >= 7:
+                cols = ["timestamp","open","high","low","close","volume","extra"]
+            else:
+                cols = ["timestamp","open","high","low","close","volume"]
+
+            df = pd.DataFrame(raw, columns=cols[:n_cols])
             df["datetime"] = (
                 pd.to_datetime(df["timestamp"], unit="s")
                 .dt.tz_localize("UTC")
                 .dt.tz_convert("Asia/Kolkata")
                 .dt.tz_localize(None)
             )
-            return df.drop(columns=["timestamp"]).set_index("datetime")
+            return df[["datetime","open","high","low","close","volume"]].set_index("datetime")
 
-        # Show message so we know what failed
         st.warning(f"Candle fetch: {symbol} → {resp.get('message', resp)}")
 
     except Exception as ex:
