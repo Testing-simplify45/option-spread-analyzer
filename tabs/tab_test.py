@@ -12,7 +12,7 @@ import plotly.graph_objects as go
 
 from data_api import (
     EXCHANGES, UNDERLYINGS, get_expiries, get_strikes,
-    _build_fyers_symbol, _get_fyers,
+    _build_fyers_symbol, _get_fyers, get_expiry_code,
 )
 
 
@@ -117,8 +117,8 @@ def render_tab():
         st.error("❌ Not connected to Fyers! Please login first.")
         return
 
-    sym1 = _build_fyers_symbol(l1_ex, l1_und, l1_exp, l1_stk, l1_typ)
-    sym2 = _build_fyers_symbol(l2_ex, l2_und, l2_exp, l2_stk, l2_typ)
+    sym1 = _build_fyers_symbol(l1_ex, l1_und, get_expiry_code(l1_und, l1_exp), l1_stk, l1_typ)
+    sym2 = _build_fyers_symbol(l2_ex, l2_und, get_expiry_code(l2_und, l2_exp), l2_stk, l2_typ)
 
     st.markdown(f"**Fetching:** `{sym1}` and `{sym2}`")
 
