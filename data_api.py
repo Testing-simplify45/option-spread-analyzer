@@ -112,14 +112,26 @@ def get_strikes(exchange: str, underlying: str, expiry: str) -> list[int]:
         return _mock_strikes(underlying)
     try:
         idx_symbol = _INDEX_SYMBOL.get(underlying)
-        exp_dt = datetime.strptime(expiry, "%Y-%m-%d").replace(hour=12)
-        response = fyers.optionchain(data={
-            "symbol": idx_symbol, "strikecount": 20,
-            "timestamp": int(exp_dt.timestamp())
-        })
-        if response.get("s") == "ok":
-            return sorted(set(int(o["strikePrice"]) for o in response["data"]["optionsChain"]))
-        st.warning(f"Strike warning: {response.get('message', response)}")
+        exp_date = datetime.strptime(expiry, "%Y-%m-%d")
+        exp_ts = int(datetime(exp_date.year, exp_date.month, exp_date.day, 15, 30, 0).timestamp())
+
+        # Try 1: integer timestamp
+        r = fyers.optionchain(data={"symbol": idx_symbol, "strikecount": 20, "timestamp": exp_ts})
+        if r.get("s") == "ok":
+            return sorted(set(int(o["strikePrice"]) for o in r["data"]["optionsChain"]))
+
+        # Try 2: string timestamp
+        r2 = fyers.optionchain(data={"symbol": idx_symbol, "strikecount": 20, "timestamp": str(exp_ts)})
+        if r2.get("s") == "ok":
+            return sorted(set(int(o["strikePrice"]) for o in r2["data"]["optionsChain"]))
+
+        # Try 3: empty timestamp (nearest expiry)
+        r3 = fyers.optionchain(data={"symbol": idx_symbol, "strikecount": 20, "timestamp": ""})
+        if r3.get("s") == "ok":
+            return sorted(set(int(o["strikePrice"]) for o in r3["data"]["optionsChain"]))
+
+        st.warning(f"Strike fetch failed | symbol={idx_symbol} | ts={exp_ts} | msg={r.get('message')}")
+
     except Exception as ex:
         st.warning(f"Strike error: {ex}")
     return _mock_strikes(underlying)
