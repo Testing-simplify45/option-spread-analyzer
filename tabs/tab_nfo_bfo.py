@@ -95,14 +95,14 @@ def _batch_fetch(strikes, option_type, ex1, und1, exp1, ex2, und2, exp2, multipl
 
 # ── Chart builders ────────────────────────────────────────────────────────────
 
-def _build_live_chart(df: pd.DataFrame, title: str, resolution: str = "1 Minute") -> go.Figure:
+def _build_live_chart(df: pd.DataFrame, title: str, resolution: str = "1 Minute", chart_type: str = "Line") -> go.Figure:
     fig = go.Figure()
     if df.empty:
         return fig
 
     df_r = resample_spread(df, resolution)
 
-    if "open" in df_r.columns:
+    if chart_type == "Candlestick" and "open" in df_r.columns:
         fig.add_trace(go.Candlestick(
             x=df_r["timestamp"],
             open=df_r["open"], high=df_r["high"],
@@ -110,37 +110,67 @@ def _build_live_chart(df: pd.DataFrame, title: str, resolution: str = "1 Minute"
             increasing_line_color=_GREEN, decreasing_line_color=_RED,
             name="Spread",
         ))
+        # Compute range from actual candle data
+        y_min = float(df_r["low"].min())
+        y_max = float(df_r["high"].max())
     else:
+        y_vals = df_r["spread"] if "spread" in df_r.columns else df_r.get("close", pd.Series())
         fig.add_trace(go.Scatter(
-            x=df_r["timestamp"], y=df_r["spread"],
+            x=df_r["timestamp"], y=y_vals,
             mode="lines", name="Spread",
-            line=dict(color=_CYAN, width=2, shape="spline"),
+            line=dict(color=_CYAN, width=2),
             fill="tozeroy", fillcolor="rgba(0,203,214,0.05)",
             hovertemplate="<b>%{x|%H:%M}</b><br>Spread: <b>%{y:.2f}</b><extra></extra>",
         ))
+        y_min = float(y_vals.min())
+        y_max = float(y_vals.max())
 
+    # Smart Y-axis padding — 5% of range above and below
+    y_range = y_max - y_min
+    padding = max(y_range * 0.05, 1.0)
+    y_axis_min = y_min - padding
+    y_axis_max = y_max + padding
+
+    # H/L/O lines using actual data values
     stats = compute_day_stats(df)
-    if stats.get("high"):
+    if stats.get("high") is not None:
         fig.add_hline(y=stats["high"], line_dash="dash", line_color=_GREEN, line_width=1,
             annotation_text=f"H {stats['high']:.2f}", annotation_position="right",
             annotation_font_color=_GREEN, annotation_font_size=10)
-    if stats.get("low"):
+    if stats.get("low") is not None:
         fig.add_hline(y=stats["low"], line_dash="dash", line_color=_RED, line_width=1,
             annotation_text=f"L {stats['low']:.2f}", annotation_position="right",
             annotation_font_color=_RED, annotation_font_size=10)
-    if stats.get("open"):
+    if stats.get("open") is not None:
         fig.add_hline(y=stats["open"], line_dash="longdash", line_color="#d29922", line_width=1,
             annotation_text=f"O {stats['open']:.2f}", annotation_position="right",
             annotation_font_color="#d29922", annotation_font_size=10)
+
+    # Filter X-axis to market hours only
+    if not df_r.empty:
+        trade_date = pd.to_datetime(df_r["timestamp"].iloc[0]).date()
+        x_min = pd.Timestamp(f"{trade_date} 09:10:00")
+        x_max = pd.Timestamp(f"{trade_date} 15:35:00")
+    else:
+        x_min = x_max = None
 
     fig.update_layout(
         title=dict(text=title, font=dict(size=12, color=_TEXT), x=0.01),
         height=380, plot_bgcolor=_PANEL, paper_bgcolor=_BG,
         font=dict(color=_MUTED, size=11),
-        margin=dict(l=50, r=80, t=40, b=40),
-        xaxis=dict(gridcolor=_EDGE, rangeslider=dict(visible=False),
-                   showspikes=True, spikecolor=_MUTED, spikemode="across"),
-        yaxis=dict(gridcolor=_EDGE, showspikes=True, spikecolor=_MUTED),
+        margin=dict(l=50, r=90, t=40, b=40),
+        xaxis=dict(
+            gridcolor=_EDGE,
+            rangeslider=dict(visible=False),
+            showspikes=True, spikecolor=_MUTED, spikemode="across",
+            range=[x_min, x_max] if x_min else None,
+            tickformat="%H:%M",
+        ),
+        yaxis=dict(
+            gridcolor=_EDGE,
+            showspikes=True, spikecolor=_MUTED,
+            range=[y_axis_min, y_axis_max],  # ← Smart range!
+        ),
         hovermode="x unified",
         legend=dict(bgcolor=_CARD, bordercolor=_EDGE, borderwidth=1),
     )
@@ -151,9 +181,18 @@ def _build_historical_chart(df_multi: pd.DataFrame, days_label: str) -> go.Figur
     """Build daily OHLC candlestick from multi-day spread data."""
     fig = go.Figure()
     if df_multi.empty:
+        fig.update_layout(
+            height=280, plot_bgcolor=_PANEL, paper_bgcolor=_BG,
+            font=dict(color=_MUTED, size=11),
+            margin=dict(l=50, r=30, t=20, b=40),
+            xaxis=dict(gridcolor=_EDGE),
+            yaxis=dict(gridcolor=_EDGE),
+            annotations=[dict(text="No historical data available", showarrow=False,
+                            x=0.5, y=0.5, xref="paper", yref="paper",
+                            font=dict(color=_MUTED, size=14))]
+        )
         return fig
 
-    # Group by date and compute OHLC per day
     df_multi = df_multi.copy()
     df_multi["date"] = pd.to_datetime(df_multi["timestamp"]).dt.date
     daily = df_multi.groupby("date")["spread"].agg(
@@ -168,13 +207,19 @@ def _build_historical_chart(df_multi: pd.DataFrame, days_label: str) -> go.Figur
         name="Daily Spread",
     ))
 
+    # Smart Y range
+    y_min = float(daily["low"].min())
+    y_max = float(daily["high"].max())
+    y_range = y_max - y_min
+    padding = max(y_range * 0.05, 1.0)
+
     fig.update_layout(
-        title=dict(text=f"Historical Spread — {days_label}", font=dict(size=12, color=_TEXT), x=0.01),
-        height=320, plot_bgcolor=_PANEL, paper_bgcolor=_BG,
+        title=dict(text=f"Historical — {days_label}", font=dict(size=12, color=_TEXT), x=0.01),
+        height=280, plot_bgcolor=_PANEL, paper_bgcolor=_BG,
         font=dict(color=_MUTED, size=11),
         margin=dict(l=50, r=30, t=40, b=40),
         xaxis=dict(gridcolor=_EDGE, rangeslider=dict(visible=False)),
-        yaxis=dict(gridcolor=_EDGE),
+        yaxis=dict(gridcolor=_EDGE, range=[y_min - padding, y_max + padding]),
         hovermode="x unified",
     )
     return fig
