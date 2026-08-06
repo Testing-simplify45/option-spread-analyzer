@@ -24,6 +24,9 @@ from data_api import (
     get_spread_history,
     resample_spread,
     compute_day_stats,
+    get_atm,
+    _STRIKE_GAP,
+    get_expiry_code,
 )
 from chart_utils import build_spread_line_chart
 
@@ -63,7 +66,8 @@ def render_tab():
         l1_expiries = get_expiries(l1_exchange, l1_under)
         l1_expiry = st.selectbox("Expiry", l1_expiries, key="l1_exp")
         l1_strikes = get_strikes(l1_exchange, l1_under, l1_expiry)
-        l1_strike = st.selectbox("Strike", l1_strikes, index=len(l1_strikes) // 2, key="l1_stk")
+        l1_strike = st.number_input("Strike", value=get_atm(l1_under),
+                                     step=_STRIKE_GAP.get(l1_under, 50), key="l1_stk")
         l1_type = st.selectbox("Option Type", ["CE", "PE"], key="l1_type")
 
     with col_sep:
@@ -81,7 +85,8 @@ def render_tab():
         l2_expiries = get_expiries(l2_exchange, l2_under)
         l2_expiry = st.selectbox("Expiry", l2_expiries, key="l2_exp")
         l2_strikes = get_strikes(l2_exchange, l2_under, l2_expiry)
-        l2_strike = st.selectbox("Strike", l2_strikes, index=len(l2_strikes) // 2, key="l2_stk")
+        l2_strike = st.number_input("Strike", value=get_atm(l2_under),
+                                     step=_STRIKE_GAP.get(l2_under, 50), key="l2_stk")
         l2_type = st.selectbox("Option Type", ["CE", "PE"], key="l2_type")
 
     st.markdown("<hr class='leg-divider'>", unsafe_allow_html=True)
