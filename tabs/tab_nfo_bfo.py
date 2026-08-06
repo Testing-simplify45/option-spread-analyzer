@@ -1,26 +1,40 @@
 """
-tabs/tab_nfo_bfo.py - Clean version: H/L only in chart, not in table
+tabs/tab_nfo_bfo.py - Complete rebuild matching UI reference
+- 2 sections only, each with own controls
+- Fetch Data button pattern (no auto-processing)
+- Current spread + Day H/L in table
+- Live chart + Historical chart per section
 """
 from __future__ import annotations
 from datetime import date, timedelta
 import streamlit as st
+import streamlit.components.v1 as components
+import plotly.graph_objects as go
+import pandas as pd
 
 from data_api import (
-    UNDERLYINGS, get_expiries, get_strikes, get_atm,
-    get_spread_history, compute_day_stats,
-    round_to_nearest_50, _build_fyers_symbol, _mock_ltp,
+    UNDERLYINGS, get_expiries, get_atm, _STRIKE_GAP,
+    get_spread_history, compute_day_stats, resample_spread,
+    round_to_nearest_50, _build_fyers_symbol, _get_fyers,
+    get_expiry_code, _mock_ltp,
 )
-from chart_utils import build_spread_line_chart
 
 _DEFAULT_RATIO      = 3.3
 _DEFAULT_MULTIPLIER = 3.3
 _DEFAULT_ADDON      = 500
-_ROWS_PER_SECTION   = 7
+_ROWS               = 7
 
+# ── Palette ───────────────────────────────────────────────────────────────────
+_BG      = "#06080f"
+_PANEL   = "#0e1220"
+_CARD    = "#141a30"
+_EDGE    = "#1f2846"
+_CYAN    = "#00cbd6"
+_TEXT    = "#eef0f6"
+_MUTED   = "#7c87a5"
+_GREEN   = "#10b981"
+_RED     = "#ef4444"
 
-def _round_nearest_atm(underlying, addon):
-    atm = get_atm(underlying)
-    return int(round(atm / addon) * addon)
 
 def _fmt(val):
     if val is None: return "—"
@@ -28,10 +42,10 @@ def _fmt(val):
     return f"{sign}{val:.2f}"
 
 def _color(val):
-    if val is None: return "#8b949e"
-    if val > 0: return "#3fb950"
-    if val < 0: return "#f85149"
-    return "#8b949e"
+    if val is None: return _MUTED
+    if val > 0: return _GREEN
+    if val < 0: return _RED
+    return _MUTED
 
 def _second_strike(first, multiplier):
     return round_to_nearest_50(first / multiplier)
@@ -39,44 +53,29 @@ def _second_strike(first, multiplier):
 def _generate_strikes(first, addon, count):
     return [first + i * addon for i in range(count)]
 
-def _prev_trading_day(d: date) -> date:
-    d -= timedelta(days=1)
-    while d.weekday() >= 5:
-        d -= timedelta(days=1)
-    return d
 
+# ── Batch fetch LTPs ─────────────────────────────────────────────────────────
 
-# ── Batch fetch LTPs for entire section ──────────────────────────────────────
-
-def _fetch_section_ltps(
-    strikes, option_type,
-    ex1, und1, exp1,
-    ex2, und2, exp2,
-    multiplier, ratio,
-):
-    """
-    Fetch all LTPs for a section in ONE batch API call.
-    Returns list of (stk1, stk2, current_spread) per row.
-    """
-    from data_api import _get_fyers
-
+def _batch_fetch(strikes, option_type, ex1, und1, exp1, ex2, und2, exp2, multiplier, ratio):
+    from data_api import _get_fyers, get_expiry_code, _build_fyers_symbol, _mock_ltp
     stk2_list = [_second_strike(s, multiplier) for s in strikes]
-    sym1_list = [_build_fyers_symbol(ex1, und1, exp1, s, option_type) for s in strikes]
-    sym2_list = [_build_fyers_symbol(ex2, und2, exp2, s, option_type) for s in stk2_list]
+    code1 = get_expiry_code(und1, exp1)
+    code2 = get_expiry_code(und2, exp2)
+    sym1_list = [_build_fyers_symbol(ex1, und1, code1, s, option_type) for s in strikes]
+    sym2_list = [_build_fyers_symbol(ex2, und2, code2, s, option_type) for s in stk2_list]
 
     fyers = _get_fyers()
     ltp_map = {}
-
-    if fyers is not None:
-        all_symbols = sym1_list + sym2_list
-        for i in range(0, len(all_symbols), 50):
-            batch = all_symbols[i:i+50]
+    if fyers:
+        all_syms = sym1_list + sym2_list
+        for i in range(0, len(all_syms), 50):
+            batch = all_syms[i:i+50]
             try:
                 resp = fyers.quotes(data={"symbols": ",".join(batch)})
                 if resp.get("s") == "ok":
                     for item in resp["d"]:
-                        sym = item.get("n", "")
-                        v = item.get("v", {})
+                        sym = item.get("n","")
+                        v   = item.get("v",{})
                         ltp = v.get("lp") or v.get("last_price") or v.get("close_price")
                         if ltp and sym:
                             ltp_map[sym] = float(ltp)
@@ -86,187 +85,413 @@ def _fetch_section_ltps(
     rows = []
     for i, stk1 in enumerate(strikes):
         stk2 = stk2_list[i]
-        sym1 = sym1_list[i]
-        sym2 = sym2_list[i]
-
-        if fyers is not None:
-            ltp1 = ltp_map.get(sym1)
-            ltp2 = ltp_map.get(sym2)
-        else:
-            ltp1 = _mock_ltp(und1, stk1)
-            ltp2 = _mock_ltp(und2, stk2)
-
-        current = None
-        if ltp1 is not None and ltp2 is not None:
-            current = round(ltp1 - ltp2 * ratio, 2)
-
-        rows.append({
-            "stk1": stk1, "stk2": stk2,
-            "sym1": sym1, "sym2": sym2,
-            "ltp1": ltp1, "ltp2": ltp2,
-            "current": current,
-        })
-
+        ltp1 = ltp_map.get(sym1_list[i]) or (_mock_ltp(und1, stk1) if not fyers else None)
+        ltp2 = ltp_map.get(sym2_list[i]) or (_mock_ltp(und2, stk2) if not fyers else None)
+        current = round(ltp1 - ltp2 * ratio, 2) if ltp1 and ltp2 else None
+        rows.append({"stk1": stk1, "stk2": stk2, "current": current,
+                     "sym1": sym1_list[i], "sym2": sym2_list[i]})
     return rows
 
 
-# ── Table section renderer ────────────────────────────────────────────────────
+# ── Chart builders ────────────────────────────────────────────────────────────
+
+def _build_live_chart(df: pd.DataFrame, title: str, resolution: str = "1 Minute") -> go.Figure:
+    fig = go.Figure()
+    if df.empty:
+        return fig
+
+    df_r = resample_spread(df, resolution)
+
+    if "open" in df_r.columns:
+        fig.add_trace(go.Candlestick(
+            x=df_r["timestamp"],
+            open=df_r["open"], high=df_r["high"],
+            low=df_r["low"],  close=df_r["close"],
+            increasing_line_color=_GREEN, decreasing_line_color=_RED,
+            name="Spread",
+        ))
+    else:
+        fig.add_trace(go.Scatter(
+            x=df_r["timestamp"], y=df_r["spread"],
+            mode="lines", name="Spread",
+            line=dict(color=_CYAN, width=2, shape="spline"),
+            fill="tozeroy", fillcolor="rgba(0,203,214,0.05)",
+            hovertemplate="<b>%{x|%H:%M}</b><br>Spread: <b>%{y:.2f}</b><extra></extra>",
+        ))
+
+    stats = compute_day_stats(df)
+    if stats.get("high"):
+        fig.add_hline(y=stats["high"], line_dash="dash", line_color=_GREEN, line_width=1,
+            annotation_text=f"H {stats['high']:.2f}", annotation_position="right",
+            annotation_font_color=_GREEN, annotation_font_size=10)
+    if stats.get("low"):
+        fig.add_hline(y=stats["low"], line_dash="dash", line_color=_RED, line_width=1,
+            annotation_text=f"L {stats['low']:.2f}", annotation_position="right",
+            annotation_font_color=_RED, annotation_font_size=10)
+    if stats.get("open"):
+        fig.add_hline(y=stats["open"], line_dash="longdash", line_color="#d29922", line_width=1,
+            annotation_text=f"O {stats['open']:.2f}", annotation_position="right",
+            annotation_font_color="#d29922", annotation_font_size=10)
+
+    fig.update_layout(
+        title=dict(text=title, font=dict(size=12, color=_TEXT), x=0.01),
+        height=380, plot_bgcolor=_PANEL, paper_bgcolor=_BG,
+        font=dict(color=_MUTED, size=11),
+        margin=dict(l=50, r=80, t=40, b=40),
+        xaxis=dict(gridcolor=_EDGE, rangeslider=dict(visible=False),
+                   showspikes=True, spikecolor=_MUTED, spikemode="across"),
+        yaxis=dict(gridcolor=_EDGE, showspikes=True, spikecolor=_MUTED),
+        hovermode="x unified",
+        legend=dict(bgcolor=_CARD, bordercolor=_EDGE, borderwidth=1),
+    )
+    return fig
+
+
+def _build_historical_chart(df_multi: pd.DataFrame, days_label: str) -> go.Figure:
+    """Build daily OHLC candlestick from multi-day spread data."""
+    fig = go.Figure()
+    if df_multi.empty:
+        return fig
+
+    # Group by date and compute OHLC per day
+    df_multi = df_multi.copy()
+    df_multi["date"] = pd.to_datetime(df_multi["timestamp"]).dt.date
+    daily = df_multi.groupby("date")["spread"].agg(
+        open="first", high="max", low="min", close="last"
+    ).reset_index()
+
+    fig.add_trace(go.Candlestick(
+        x=daily["date"].astype(str),
+        open=daily["open"], high=daily["high"],
+        low=daily["low"],  close=daily["close"],
+        increasing_line_color=_GREEN, decreasing_line_color=_RED,
+        name="Daily Spread",
+    ))
+
+    fig.update_layout(
+        title=dict(text=f"Historical Spread — {days_label}", font=dict(size=12, color=_TEXT), x=0.01),
+        height=320, plot_bgcolor=_PANEL, paper_bgcolor=_BG,
+        font=dict(color=_MUTED, size=11),
+        margin=dict(l=50, r=30, t=40, b=40),
+        xaxis=dict(gridcolor=_EDGE, rangeslider=dict(visible=False)),
+        yaxis=dict(gridcolor=_EDGE),
+        hovermode="x unified",
+    )
+    return fig
+
+
+# ── Section renderer ──────────────────────────────────────────────────────────
 
 def _render_section(
-    label, option_type, strikes,
-    ex1, und1, exp1,
-    ex2, und2, exp2,
-    multiplier, ratio, trade_date,
-    section_key,
+    section_id: str, label: str,
+    ex1, und1, exp1, ex2, und2, exp2,
+    trade_date: date,
 ):
-    st.markdown(
-        f'<div class="section-header">'
-        f'<div class="section-dot" style="background:{"#58a6ff" if option_type=="CE" else "#d29922"}"></div>'
-        f'<h3>{label} — {option_type}</h3></div>',
-        unsafe_allow_html=True,
-    )
+    # ── Per-section controls ─────────────────────────────────────────────────
+    with st.expander(f"⚙️ {label} Controls", expanded=True):
+        sc1, sc2, sc3, sc4, sc5 = st.columns(5)
+        with sc1:
+            opt_type = st.selectbox("CE / PE", ["CE", "PE"], key=f"{section_id}_type")
+        with sc2:
+            first_strike = st.number_input(
+                "First Strike", value=_round_atm(und1, _DEFAULT_ADDON),
+                step=100, key=f"{section_id}_strike"
+            )
+        with sc3:
+            multiplier = st.number_input(
+                "Multiplier", value=_DEFAULT_MULTIPLIER, step=0.01,
+                format="%.4f", key=f"{section_id}_mult"
+            )
+        with sc4:
+            ratio = st.number_input(
+                "Ratio", value=_DEFAULT_RATIO, step=0.01,
+                format="%.4f", key=f"{section_id}_ratio"
+            )
+        with sc5:
+            addon = st.number_input(
+                "Add-on", value=_DEFAULT_ADDON, step=50,
+                key=f"{section_id}_addon"
+            )
 
-    # Column headers
-    h1,h2,h3,h4 = st.columns([2,2,3,2])
-    for col, hdr in zip([h1,h2,h3,h4], ["First Strike","Second Strike","Current Spread",""]):
+        fetch_btn = st.button(f"🔄 Fetch {label} Data", key=f"{section_id}_fetch",
+                              type="primary", use_container_width=False)
+
+    strikes = _generate_strikes(int(first_strike), int(addon), _ROWS)
+
+    # ── Section header ───────────────────────────────────────────────────────
+    st.markdown(f"""
+    <div style="display:flex;align-items:center;justify-content:space-between;
+                margin:16px 0 12px;padding-bottom:10px;border-bottom:1px solid {_EDGE}">
+        <div style="display:flex;align-items:center;gap:10px">
+            <div style="width:8px;height:8px;border-radius:50%;
+                        background:{'#58a6ff' if opt_type=='CE' else '#d29922'}"></div>
+            <span style="font-size:0.85rem;font-weight:700;color:{_MUTED};
+                         text-transform:uppercase;letter-spacing:2px;
+                         font-family:JetBrains Mono,monospace">{label} — {opt_type}</span>
+        </div>
+        <span style="font-size:0.75rem;color:{_MUTED};font-family:JetBrains Mono,monospace">
+            Ratio ×{ratio:.4f} · Multiplier ×{multiplier:.4f}
+        </span>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # ── Table header ─────────────────────────────────────────────────────────
+    h1,h2,h3,h4,h5,h6 = st.columns([2,2,2,2,2,2])
+    for col, hdr in zip([h1,h2,h3,h4,h5,h6],
+                        ["First Strike","Second Strike","Current Spread","Day High","Day Low",""]):
         with col:
             st.markdown(
-                f"<div style='font-size:0.72rem;color:#8b949e;text-transform:uppercase;"
-                f"letter-spacing:1px;padding:4px 4px 8px;font-family:JetBrains Mono,monospace'>"
-                f"{hdr}</div>", unsafe_allow_html=True)
+                f"<div style='font-size:0.7rem;color:{_MUTED};text-transform:uppercase;"
+                f"letter-spacing:1px;padding:4px 4px 8px;"
+                f"font-family:JetBrains Mono,monospace'>{hdr}</div>",
+                unsafe_allow_html=True)
 
-    st.markdown("<div style='border-top:1px solid #1e263d;margin-bottom:4px'></div>", unsafe_allow_html=True)
+    st.markdown(f"<div style='border-top:1px solid {_EDGE};margin-bottom:4px'></div>",
+                unsafe_allow_html=True)
 
-    # Fetch all LTPs in one batch
-    with st.spinner(f"Loading {option_type} spreads..."):
-        rows = _fetch_section_ltps(
-            strikes, option_type,
-            ex1, und1, exp1,
-            ex2, und2, exp2,
-            multiplier, ratio,
-        )
+    # ── Fetch data on button click ────────────────────────────────────────────
+    data_key = f"{section_id}_data"
+    hist_key = f"{section_id}_hist"
 
-    # Render rows
-    for i, row in enumerate(rows):
-        row_key = f"{section_key}_{option_type}_{i}"
-        c1,c2,c3,c4 = st.columns([2,2,3,2])
-
-        def cell(val, color="#e6edf3", bold=False):
-            fw = "700" if bold else "400"
-            return (f"<div style='font-family:JetBrains Mono,monospace;font-size:0.9rem;"
-                    f"padding:8px 4px;color:{color};font-weight:{fw}'>{val}</div>")
-
-        with c1: st.markdown(cell(row["stk1"], "#e6edf3", bold=True), unsafe_allow_html=True)
-        with c2: st.markdown(cell(row["stk2"], "#8b949e"), unsafe_allow_html=True)
-        with c3: st.markdown(cell(_fmt(row["current"]), _color(row["current"]), bold=True), unsafe_allow_html=True)
-        with c4:
-            if st.button("📈 View Chart", key=f"btn_{row_key}"):
-                k = f"chart_{row_key}"
-                st.session_state[k] = not st.session_state.get(k, False)
-
-        # Chart (lazy — only renders on click, fetches history HERE)
-        if st.session_state.get(f"chart_{row_key}", False):
-            stk1, stk2 = row["stk1"], row["stk2"]
-            with st.spinner("Loading chart data..."):
+    if fetch_btn:
+        with st.spinner(f"Fetching {label} data..."):
+            rows = _batch_fetch(
+                strikes, opt_type,
+                ex1, und1, exp1,
+                ex2, und2, exp2,
+                multiplier, ratio
+            )
+            # Fetch H/L for each row
+            for row in rows:
                 df = get_spread_history(
-                    ex1, und1, exp1, stk1, option_type,
-                    ex2, und2, exp2, stk2, option_type,
+                    ex1, und1, exp1, row["stk1"], opt_type,
+                    ex2, und2, exp2, row["stk2"], opt_type,
                     trade_date, ratio=ratio,
                 )
-            stats = compute_day_stats(df)
+                stats = compute_day_stats(df)
+                row["high"]    = stats.get("high")
+                row["low"]     = stats.get("low")
+                row["df"]      = df
+            st.session_state[data_key] = rows
 
-            # Stats bar
-            sc1,sc2,sc3,sc4,sc5,sc6 = st.columns(6)
-            for col, lbl, k, clr in [
-                (sc1,"Open","open","#e6edf3"),
-                (sc2,"High","high","#3fb950"),
-                (sc3,"Low","low","#f85149"),
-                (sc4,"Current","current","#58a6ff"),
-                (sc5,"High @","high_time","#8b949e"),
-                (sc6,"Low @","low_time","#8b949e"),
-            ]:
-                with col:
-                    val = stats.get(k)
-                    if hasattr(val, "strftime"):
-                        display = val.strftime("%H:%M")
-                    elif val is not None:
-                        sign = "+" if val > 0 else ""
-                        display = f"{sign}{val:.2f}"
-                    else:
-                        display = "—"
-                    st.markdown(f"""
-                    <div class="metric-card" style="padding:10px 14px">
-                        <div class="metric-label">{lbl}</div>
-                        <div style="font-family:JetBrains Mono,monospace;font-size:1.1rem;
-                                    font-weight:700;color:{clr}">{display}</div>
-                    </div>""", unsafe_allow_html=True)
+    rows = st.session_state.get(data_key, [
+        {"stk1": s, "stk2": _second_strike(s, multiplier),
+         "current": None, "high": None, "low": None, "df": pd.DataFrame()}
+        for s in strikes
+    ])
 
-            st.markdown("<br>", unsafe_allow_html=True)
+    # ── Render rows ───────────────────────────────────────────────────────────
+    for i, row in enumerate(rows):
+        row_key = f"{section_id}_{opt_type}_{i}"
+        c1,c2,c3,c4,c5,c6 = st.columns([2,2,2,2,2,2])
 
-            df_chart = df[["timestamp","spread"]].copy() if not df.empty else df
-            title = f"{und1} {stk1} vs {und2} {stk2}  ·  {option_type}  ·  {trade_date.strftime('%d %b %Y')}"
-            fig = build_spread_line_chart(df_chart, title=title, stats=stats, resolution="Tick")
-            st.plotly_chart(fig, use_container_width=True, config={"scrollZoom": True})
+        def cell(val, color=_TEXT, bold=False):
+            fw = "700" if bold else "400"
+            return (f"<div style='font-family:JetBrains Mono,monospace;font-size:0.88rem;"
+                    f"padding:8px 4px;color:{color};font-weight:{fw}'>{val}</div>")
 
-        st.markdown("<div style='border-top:1px solid #1c2230;margin:2px 0'></div>", unsafe_allow_html=True)
+        with c1: st.markdown(cell(row["stk1"], _TEXT, bold=True), unsafe_allow_html=True)
+        with c2: st.markdown(cell(row["stk2"], _MUTED), unsafe_allow_html=True)
+        with c3: st.markdown(cell(_fmt(row["current"]), _CYAN if row["current"] else _MUTED, bold=True), unsafe_allow_html=True)
+        with c4: st.markdown(cell(_fmt(row.get("high")), _GREEN), unsafe_allow_html=True)
+        with c5: st.markdown(cell(_fmt(row.get("low")), _RED), unsafe_allow_html=True)
+        with c6:
+            if st.button("📈 View Chart", key=f"btn_{row_key}"):
+                k = f"chart_{section_id}"
+                st.session_state[k] = i
+                # Store selected row df
+                st.session_state[f"chart_df_{section_id}"] = row.get("df", pd.DataFrame())
+                st.session_state[f"chart_title_{section_id}"] = (
+                    f"{und1} {row['stk1']} vs {und2} {row['stk2']} · {opt_type}"
+                )
+
+        st.markdown(f"<div style='border-top:1px solid {_EDGE}22;margin:2px 0'></div>",
+                    unsafe_allow_html=True)
+
+    # ── Live chart (shown when any View Chart clicked) ────────────────────────
+    chart_key = f"chart_{section_id}"
+    if chart_key in st.session_state:
+        selected_idx = st.session_state[chart_key]
+        df_chart     = st.session_state.get(f"chart_df_{section_id}", pd.DataFrame())
+        chart_title  = st.session_state.get(f"chart_title_{section_id}", "")
+        stats        = compute_day_stats(df_chart)
+
+        st.markdown(f"""
+        <div style="background:{_PANEL};border:1px solid {_EDGE};border-radius:12px;
+                    padding:14px 20px;margin:16px 0 8px">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+                <div style="display:flex;align-items:center;gap:10px">
+                    <div style="width:28px;height:28px;border-radius:8px;
+                                background:rgba(0,203,214,0.1);border:1px solid rgba(0,203,214,0.3);
+                                display:flex;align-items:center;justify-content:center;color:{_CYAN};font-size:12px">⚡</div>
+                    <span style="font-size:0.85rem;font-weight:600;color:{_TEXT}">Live Spread Chart</span>
+                    <span style="font-size:0.75rem;color:{_MUTED};font-family:JetBrains Mono,monospace">{chart_title}</span>
+                </div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        # Stats bar
+        sc1,sc2,sc3,sc4,sc5,sc6 = st.columns(6)
+        for col, lbl, k, clr in [
+            (sc1,"Open","open",_TEXT),
+            (sc2,"High","high",_GREEN),
+            (sc3,"Low","low",_RED),
+            (sc4,"Current","current",_CYAN),
+            (sc5,"High @","high_time",_MUTED),
+            (sc6,"Low @","low_time",_MUTED),
+        ]:
+            with col:
+                val = stats.get(k)
+                if hasattr(val, "strftime"):
+                    display = val.strftime("%H:%M")
+                elif val is not None:
+                    sign = "+" if val > 0 else ""
+                    display = f"{sign}{val:.2f}"
+                else:
+                    display = "—"
+                st.markdown(f"""
+                <div style="background:{_CARD};border:1px solid {_EDGE};border-radius:10px;
+                            padding:12px 16px">
+                    <div style="font-size:0.68rem;color:{_MUTED};text-transform:uppercase;
+                                letter-spacing:1px;font-family:JetBrains Mono,monospace;
+                                margin-bottom:6px">{lbl}</div>
+                    <div style="font-size:1.2rem;font-weight:700;
+                                font-family:JetBrains Mono,monospace;color:{clr}">{display}</div>
+                </div>""", unsafe_allow_html=True)
+
+        st.markdown("<br>", unsafe_allow_html=True)
+
+        # Resolution selector
+        res_col, type_col, _ = st.columns([2, 2, 6])
+        with res_col:
+            resolution = st.selectbox(
+                "Interval", ["1 Minute","5 Minutes","15 Minutes","30 Seconds"],
+                index=0, key=f"res_{section_id}"
+            )
+        with type_col:
+            chart_type = st.selectbox(
+                "Type", ["Line","Candlestick"], key=f"ctype_{section_id}"
+            )
+
+        # Build chart
+        if chart_type == "Candlestick" and not df_chart.empty:
+            df_r = resample_spread(df_chart, resolution)
+            if "open" in df_r.columns:
+                fig = go.Figure(go.Candlestick(
+                    x=df_r["timestamp"],
+                    open=df_r["open"], high=df_r["high"],
+                    low=df_r["low"],  close=df_r["close"],
+                    increasing_line_color=_GREEN, decreasing_line_color=_RED,
+                ))
+            else:
+                fig = _build_live_chart(df_chart, chart_title, resolution)
+        else:
+            fig = _build_live_chart(df_chart, chart_title, resolution)
+
+        st.plotly_chart(fig, use_container_width=True, config={"scrollZoom": True})
+
+        # ── Historical chart ──────────────────────────────────────────────────
+        st.markdown(f"""
+        <div style="display:flex;align-items:center;justify-content:space-between;
+                    margin:16px 0 8px">
+            <div style="display:flex;align-items:center;gap:10px">
+                <div style="width:28px;height:28px;border-radius:8px;
+                            background:rgba(0,203,214,0.1);border:1px solid rgba(0,203,214,0.3);
+                            display:flex;align-items:center;justify-content:center;color:{_CYAN};font-size:12px">🕐</div>
+                <span style="font-size:0.85rem;font-weight:600;color:{_TEXT}">Historical Spread Trend</span>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        hist_col, _ = st.columns([3, 7])
+        with hist_col:
+            hist_days = st.selectbox(
+                "Period", ["1D","5D","1M","6M"],
+                key=f"hist_{section_id}"
+            )
+
+        days_map = {"1D": 1, "5D": 5, "1M": 22, "6M": 130}
+        n_days   = days_map[hist_days]
+
+        if fetch_btn or f"hist_df_{section_id}" not in st.session_state:
+            if fetch_btn:
+                # Fetch multi-day history for selected row
+                row = rows[selected_idx] if selected_idx < len(rows) else rows[0]
+                frames = []
+                d = trade_date
+                collected = 0
+                while collected < n_days:
+                    if d.weekday() < 5:
+                        df_d = get_spread_history(
+                            ex1, und1, exp1, row["stk1"], opt_type,
+                            ex2, und2, exp2, row["stk2"], opt_type,
+                            d, ratio=ratio,
+                        )
+                        if not df_d.empty:
+                            frames.append(df_d)
+                        collected += 1
+                    d -= timedelta(days=1)
+                st.session_state[f"hist_df_{section_id}"] = (
+                    pd.concat(frames[::-1], ignore_index=True) if frames else pd.DataFrame()
+                )
+
+        df_hist = st.session_state.get(f"hist_df_{section_id}", pd.DataFrame())
+        fig_hist = _build_historical_chart(df_hist, hist_days)
+        st.plotly_chart(fig_hist, use_container_width=True, config={"scrollZoom": True})
+
+
+def _round_atm(underlying, addon):
+    atm = get_atm(underlying)
+    return int(round(atm / addon) * addon)
 
 
 # ── Main render ───────────────────────────────────────────────────────────────
 
 def render_tab():
+    # ── Top Controls ─────────────────────────────────────────────────────────
     st.markdown("### NFO-BFO Spread Analysis")
-    st.caption("Spread = First Leg − (Second Leg × Ratio)  ·  Click View Chart for High/Low/Open/Close")
+    st.caption("Configure legs below. Click **Fetch Data** in each section to load spreads.")
 
-    with st.expander("⚙️  Controls", expanded=True):
-        r1c1,r1c2,r1c3,r1c4 = st.columns(4)
-        with r1c1:
-            st.markdown("**Exchange**")
-            ex1 = st.selectbox("First Leg Exchange", ["BSE","NSE"], index=0, key="nfo_ex1")
-            ex2 = st.selectbox("Second Leg Exchange", ["NSE","BSE"], index=0, key="nfo_ex2")
-        with r1c2:
-            st.markdown("**Index**")
-            und1 = st.selectbox("First Leg Index", UNDERLYINGS.get(ex1,["SENSEX"]), key="nfo_und1")
-            und2 = st.selectbox("Second Leg Index", UNDERLYINGS.get(ex2,["NIFTY"]), key="nfo_und2")
-        with r1c3:
-            st.markdown("**Parameters**")
-            ratio = st.number_input("Ratio", value=_DEFAULT_RATIO, step=0.01, format="%.4f", key="nfo_ratio")
-            multiplier = st.number_input("Multiplier", value=_DEFAULT_MULTIPLIER, step=0.01, format="%.4f", key="nfo_mult")
-        with r1c4:
-            st.markdown("**Strike Ladder**")
-            addon = st.number_input("Add-on", value=_DEFAULT_ADDON, step=50, key="nfo_addon")
-            trade_date = st.date_input("Date", value=date.today(), max_value=date.today(), key="nfo_date")
-
-        r2c1,r2c2,_ = st.columns([3,3,4])
-        with r2c1:
-            exp1 = st.selectbox("First Leg Expiry", get_expiries(ex1, und1), key="nfo_exp1")
-        with r2c2:
-            exp2 = st.selectbox("Second Leg Expiry", get_expiries(ex2, und2), key="nfo_exp2")
-
-        r3c1,_,__ = st.columns([3,3,4])
-        with r3c1:
-            first_strike = st.number_input(
-                "First Strike", value=_round_nearest_atm(und1, int(addon)),
-                step=int(addon), key="nfo_first_strike"
-            )
+    with st.expander("⚙️ Common Controls", expanded=True):
+        r1, r2, r3, r4 = st.columns(4)
+        with r1:
+            st.markdown("**First Leg**")
+            ex1  = st.selectbox("Exchange",   ["BSE","NSE"], index=0,  key="nfo_ex1")
+            und1 = st.selectbox("Index",      UNDERLYINGS.get(ex1,["SENSEX"]), key="nfo_und1")
+            exp1_list = get_expiries(ex1, und1)
+            exp1 = st.selectbox("Expiry",     exp1_list, key="nfo_exp1")
+        with r2:
+            st.markdown("**Second Leg**")
+            ex2  = st.selectbox("Exchange",   ["NSE","BSE"], index=0,  key="nfo_ex2")
+            und2 = st.selectbox("Index",      UNDERLYINGS.get(ex2,["NIFTY"]), key="nfo_und2")
+            exp2_list = get_expiries(ex2, und2)
+            exp2 = st.selectbox("Expiry",     exp2_list, key="nfo_exp2")
+        with r3:
+            st.markdown("**Date**")
+            trade_date = st.date_input("Date", value=date.today(),
+                                       max_value=date.today(), key="nfo_date")
+        with r4:
+            st.markdown(" ")
+            st.markdown("<br>", unsafe_allow_html=True)
+            st.caption(f"First: {ex1} {und1} | Second: {ex2} {und2}")
 
     st.markdown("---")
 
-    col_rf, col_note = st.columns([2,8])
-    with col_rf:
-        if st.button("🔄 Refresh", key="nfo_refresh"):
-            st.rerun()
-    with col_note:
-        st.caption(f"Ratio ×{ratio:.4f}  ·  Multiplier ×{multiplier:.4f}  ·  High/Low visible in chart on click")
+    # ── Section A ─────────────────────────────────────────────────────────────
+    _render_section(
+        section_id="A", label="Section A",
+        ex1=ex1, und1=und1, exp1=exp1,
+        ex2=ex2, und2=und2, exp2=exp2,
+        trade_date=trade_date,
+    )
 
-    st.markdown("<br>", unsafe_allow_html=True)
+    st.markdown("<br><br>", unsafe_allow_html=True)
 
-    strikes_a = _generate_strikes(int(first_strike), int(addon), _ROWS_PER_SECTION)
-    strikes_b = _generate_strikes(int(first_strike) + _ROWS_PER_SECTION * int(addon), int(addon), _ROWS_PER_SECTION)
-
-    _render_section("Section A","CE", strikes_a, ex1,und1,exp1, ex2,und2,exp2, multiplier,ratio,trade_date,"A")
-    st.markdown("<br>", unsafe_allow_html=True)
-    _render_section("Section A","PE", strikes_a, ex1,und1,exp1, ex2,und2,exp2, multiplier,ratio,trade_date,"B")
-    st.markdown("<br>", unsafe_allow_html=True)
-    _render_section("Section B","CE", strikes_b, ex1,und1,exp1, ex2,und2,exp2, multiplier,ratio,trade_date,"C")
-    st.markdown("<br>", unsafe_allow_html=True)
-    _render_section("Section B","PE", strikes_b, ex1,und1,exp1, ex2,und2,exp2, multiplier,ratio,trade_date,"D")
+    # ── Section B ─────────────────────────────────────────────────────────────
+    _render_section(
+        section_id="B", label="Section B",
+        ex1=ex1, und1=und1, exp1=exp1,
+        ex2=ex2, und2=und2, exp2=exp2,
+        trade_date=trade_date,
+    )
