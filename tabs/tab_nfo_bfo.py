@@ -98,6 +98,12 @@ def _batch_fetch(strikes, option_type, ex1, und1, exp1, ex2, und2, exp2, multipl
 def _build_live_chart(df: pd.DataFrame, title: str, resolution: str = "1 Minute", chart_type: str = "Line") -> go.Figure:
     fig = go.Figure()
     if df.empty:
+        fig.update_layout(
+            height=380, plot_bgcolor=_PANEL, paper_bgcolor=_BG,
+            annotations=[dict(text="No data available", showarrow=False,
+                x=0.5, y=0.5, xref="paper", yref="paper",
+                font=dict(color=_MUTED, size=14))]
+        )
         return fig
 
     df_r = resample_spread(df, resolution)
@@ -110,47 +116,44 @@ def _build_live_chart(df: pd.DataFrame, title: str, resolution: str = "1 Minute"
             increasing_line_color=_GREEN, decreasing_line_color=_RED,
             name="Spread",
         ))
-        # Compute range from actual candle data
         y_min = float(df_r["low"].min())
         y_max = float(df_r["high"].max())
     else:
-        y_vals = df_r["spread"] if "spread" in df_r.columns else df_r.get("close", pd.Series())
+        y_col = "spread" if "spread" in df_r.columns else "close"
+        y_vals = df_r[y_col]
         fig.add_trace(go.Scatter(
             x=df_r["timestamp"], y=y_vals,
             mode="lines", name="Spread",
             line=dict(color=_CYAN, width=2),
-            fill="tozeroy", fillcolor="rgba(0,203,214,0.05)",
             hovertemplate="<b>%{x|%H:%M}</b><br>Spread: <b>%{y:.2f}</b><extra></extra>",
         ))
         y_min = float(y_vals.min())
         y_max = float(y_vals.max())
 
-    # Smart Y-axis padding — 5% of range above and below
-    y_range = y_max - y_min
-    padding = max(y_range * 0.05, 1.0)
-    y_axis_min = y_min - padding
-    y_axis_max = y_max + padding
+    # Smart Y-axis: 5% padding above and below actual data range
+    y_range  = max(y_max - y_min, 1.0)
+    padding  = y_range * 0.07
+    y_lo     = y_min - padding
+    y_hi     = y_max + padding
 
-    # H/L/O lines using actual data values
+    # H/L/O reference lines
     stats = compute_day_stats(df)
-    if stats.get("high") is not None:
-        fig.add_hline(y=stats["high"], line_dash="dash", line_color=_GREEN, line_width=1,
-            annotation_text=f"H {stats['high']:.2f}", annotation_position="right",
-            annotation_font_color=_GREEN, annotation_font_size=10)
-    if stats.get("low") is not None:
-        fig.add_hline(y=stats["low"], line_dash="dash", line_color=_RED, line_width=1,
-            annotation_text=f"L {stats['low']:.2f}", annotation_position="right",
-            annotation_font_color=_RED, annotation_font_size=10)
-    if stats.get("open") is not None:
-        fig.add_hline(y=stats["open"], line_dash="longdash", line_color="#d29922", line_width=1,
-            annotation_text=f"O {stats['open']:.2f}", annotation_position="right",
-            annotation_font_color="#d29922", annotation_font_size=10)
+    for val, color, label, dash in [
+        (stats.get("high"), _GREEN,   f"H {stats.get('high', 0):.2f}",  "dash"),
+        (stats.get("low"),  _RED,     f"L {stats.get('low', 0):.2f}",   "dash"),
+        (stats.get("open"), "#d29922",f"O {stats.get('open', 0):.2f}",  "longdash"),
+    ]:
+        if val is not None:
+            fig.add_hline(y=val, line_dash=dash, line_color=color, line_width=1,
+                annotation_text=label, annotation_position="right",
+                annotation_font_color=color, annotation_font_size=10)
 
-    # Filter X-axis to market hours only
+    # X-axis: market hours only (9:10 - 15:35)
     if not df_r.empty:
-        trade_date = pd.to_datetime(df_r["timestamp"].iloc[0]).date()
-        x_min = pd.Timestamp(f"{trade_date} 09:10:00")
-        x_max = pd.Timestamp(f"{trade_date} 15:35:00")
+        ts = pd.to_datetime(df_r["timestamp"].iloc[0])
+        d  = ts.date()
+        x_min = pd.Timestamp(f"{d} 09:10:00")
+        x_max = pd.Timestamp(f"{d} 15:35:00")
     else:
         x_min = x_max = None
 
@@ -160,16 +163,15 @@ def _build_live_chart(df: pd.DataFrame, title: str, resolution: str = "1 Minute"
         font=dict(color=_MUTED, size=11),
         margin=dict(l=50, r=90, t=40, b=40),
         xaxis=dict(
-            gridcolor=_EDGE,
-            rangeslider=dict(visible=False),
+            gridcolor=_EDGE, rangeslider=dict(visible=False),
             showspikes=True, spikecolor=_MUTED, spikemode="across",
             range=[x_min, x_max] if x_min else None,
             tickformat="%H:%M",
         ),
         yaxis=dict(
-            gridcolor=_EDGE,
-            showspikes=True, spikecolor=_MUTED,
-            range=[y_axis_min, y_axis_max],  # ← Smart range!
+            gridcolor=_EDGE, showspikes=True, spikecolor=_MUTED,
+            range=[y_lo, y_hi],
+            autorange=False,
         ),
         hovermode="x unified",
         legend=dict(bgcolor=_CARD, bordercolor=_EDGE, borderwidth=1),
@@ -177,9 +179,10 @@ def _build_live_chart(df: pd.DataFrame, title: str, resolution: str = "1 Minute"
     return fig
 
 
-def _build_historical_chart(df_multi: pd.DataFrame, days_label: str) -> go.Figure:
+def _build_historical_chart(df_multi: pd.DataFrame, period: str) -> go.Figure:
     """Build daily OHLC candlestick from multi-day spread data."""
     fig = go.Figure()
+
     if df_multi.empty:
         fig.update_layout(
             height=280, plot_bgcolor=_PANEL, paper_bgcolor=_BG,
@@ -187,15 +190,15 @@ def _build_historical_chart(df_multi: pd.DataFrame, days_label: str) -> go.Figur
             margin=dict(l=50, r=30, t=20, b=40),
             xaxis=dict(gridcolor=_EDGE),
             yaxis=dict(gridcolor=_EDGE),
-            annotations=[dict(text="No historical data available", showarrow=False,
-                            x=0.5, y=0.5, xref="paper", yref="paper",
-                            font=dict(color=_MUTED, size=14))]
+            annotations=[dict(text="No historical data — click Fetch Data first",
+                showarrow=False, x=0.5, y=0.5, xref="paper", yref="paper",
+                font=dict(color=_MUTED, size=13))]
         )
         return fig
 
-    df_multi = df_multi.copy()
-    df_multi["date"] = pd.to_datetime(df_multi["timestamp"]).dt.date
-    daily = df_multi.groupby("date")["spread"].agg(
+    df_m = df_multi.copy()
+    df_m["date"] = pd.to_datetime(df_m["timestamp"]).dt.date
+    daily = df_m.groupby("date")["spread"].agg(
         open="first", high="max", low="min", close="last"
     ).reset_index()
 
@@ -210,16 +213,16 @@ def _build_historical_chart(df_multi: pd.DataFrame, days_label: str) -> go.Figur
     # Smart Y range
     y_min = float(daily["low"].min())
     y_max = float(daily["high"].max())
-    y_range = y_max - y_min
-    padding = max(y_range * 0.05, 1.0)
+    y_range = max(y_max - y_min, 1.0)
+    padding = y_range * 0.07
 
     fig.update_layout(
-        title=dict(text=f"Historical — {days_label}", font=dict(size=12, color=_TEXT), x=0.01),
-        height=280, plot_bgcolor=_PANEL, paper_bgcolor=_BG,
+        title=dict(text=f"Historical Spread — {period}", font=dict(size=12, color=_TEXT), x=0.01),
+        height=300, plot_bgcolor=_PANEL, paper_bgcolor=_BG,
         font=dict(color=_MUTED, size=11),
         margin=dict(l=50, r=30, t=40, b=40),
         xaxis=dict(gridcolor=_EDGE, rangeslider=dict(visible=False)),
-        yaxis=dict(gridcolor=_EDGE, range=[y_min - padding, y_max + padding]),
+        yaxis=dict(gridcolor=_EDGE, range=[y_min - padding, y_max + padding], autorange=False),
         hovermode="x unified",
     )
     return fig
@@ -232,34 +235,53 @@ def _render_section(
     ex1, und1, exp1, ex2, und2, exp2,
     trade_date: date,
 ):
-    # ── Per-section controls ─────────────────────────────────────────────────
+    # ── Per-section controls inside a form (no rerun until submit) ───────────
     with st.expander(f"⚙️ {label} Controls", expanded=True):
-        sc1, sc2, sc3, sc4, sc5 = st.columns(5)
-        with sc1:
-            opt_type = st.selectbox("CE / PE", ["CE", "PE"], key=f"{section_id}_type")
-        with sc2:
-            first_strike = st.number_input(
-                "First Strike", value=_round_atm(und1, _DEFAULT_ADDON),
-                step=100, key=f"{section_id}_strike"
-            )
-        with sc3:
-            multiplier = st.number_input(
-                "Multiplier", value=_DEFAULT_MULTIPLIER, step=0.01,
-                format="%.4f", key=f"{section_id}_mult"
-            )
-        with sc4:
-            ratio = st.number_input(
-                "Ratio", value=_DEFAULT_RATIO, step=0.01,
-                format="%.4f", key=f"{section_id}_ratio"
-            )
-        with sc5:
-            addon = st.number_input(
-                "Add-on", value=_DEFAULT_ADDON, step=50,
-                key=f"{section_id}_addon"
+        with st.form(key=f"form_{section_id}"):
+            sc1, sc2, sc3, sc4, sc5 = st.columns(5)
+            with sc1:
+                opt_type = st.selectbox("CE / PE", ["CE", "PE"], key=f"{section_id}_type")
+            with sc2:
+                first_strike = st.number_input(
+                    "First Strike", value=_round_atm(und1, _DEFAULT_ADDON),
+                    step=100, key=f"{section_id}_strike"
+                )
+            with sc3:
+                multiplier = st.number_input(
+                    "Multiplier", value=_DEFAULT_MULTIPLIER, step=0.01,
+                    format="%.4f", key=f"{section_id}_mult"
+                )
+            with sc4:
+                ratio = st.number_input(
+                    "Ratio", value=_DEFAULT_RATIO, step=0.01,
+                    format="%.4f", key=f"{section_id}_ratio"
+                )
+            with sc5:
+                addon = st.number_input(
+                    "Add-on", value=_DEFAULT_ADDON, step=50,
+                    key=f"{section_id}_addon"
+                )
+            fetch_btn = st.form_submit_button(
+                f"🔄 Fetch {label} Data", type="primary", use_container_width=False
             )
 
-        fetch_btn = st.button(f"🔄 Fetch {label} Data", key=f"{section_id}_fetch",
-                              type="primary", use_container_width=False)
+        # Store submitted values in session state so they persist
+        if fetch_btn:
+            st.session_state[f"{section_id}_submitted"] = {
+                "opt_type":     opt_type,
+                "first_strike": first_strike,
+                "multiplier":   multiplier,
+                "ratio":        ratio,
+                "addon":        addon,
+            }
+
+    # Use submitted values if available, else defaults
+    submitted = st.session_state.get(f"{section_id}_submitted", {})
+    opt_type     = submitted.get("opt_type",     opt_type if not submitted else "CE")
+    first_strike = submitted.get("first_strike", first_strike if not submitted else _round_atm(und1, _DEFAULT_ADDON))
+    multiplier   = submitted.get("multiplier",   multiplier if not submitted else _DEFAULT_MULTIPLIER)
+    ratio        = submitted.get("ratio",         ratio if not submitted else _DEFAULT_RATIO)
+    addon        = submitted.get("addon",         addon if not submitted else _DEFAULT_ADDON)
 
     strikes = _generate_strikes(int(first_strike), int(addon), _ROWS)
 
@@ -438,34 +460,34 @@ def _render_section(
 
         # ── Historical chart ──────────────────────────────────────────────────
         st.markdown(f"""
-        <div style="display:flex;align-items:center;justify-content:space-between;
-                    margin:16px 0 8px">
-            <div style="display:flex;align-items:center;gap:10px">
-                <div style="width:28px;height:28px;border-radius:8px;
-                            background:rgba(0,203,214,0.1);border:1px solid rgba(0,203,214,0.3);
-                            display:flex;align-items:center;justify-content:center;color:{_CYAN};font-size:12px">🕐</div>
-                <span style="font-size:0.85rem;font-weight:600;color:{_TEXT}">Historical Spread Trend</span>
-            </div>
+        <div style="display:flex;align-items:center;gap:10px;margin:20px 0 10px">
+            <div style="width:28px;height:28px;border-radius:8px;
+                        background:rgba(0,203,214,0.1);border:1px solid rgba(0,203,214,0.3);
+                        display:flex;align-items:center;justify-content:center;
+                        color:{_CYAN};font-size:12px">🕐</div>
+            <span style="font-size:0.85rem;font-weight:600;color:{_TEXT}">Historical Spread Trend</span>
         </div>
         """, unsafe_allow_html=True)
 
-        hist_col, _ = st.columns([3, 7])
+        hist_col, fetch_hist_col, _ = st.columns([2, 2, 6])
         with hist_col:
             hist_days = st.selectbox(
                 "Period", ["1D","5D","1M","6M"],
-                key=f"hist_{section_id}"
+                index=0, key=f"hist_{section_id}"
             )
+        with fetch_hist_col:
+            st.markdown("<br>", unsafe_allow_html=True)
+            fetch_hist = st.button("Load History", key=f"fetch_hist_{section_id}")
 
         days_map = {"1D": 1, "5D": 5, "1M": 22, "6M": 130}
-        n_days   = days_map[hist_days]
+        n_days = days_map[hist_days]
 
-        if fetch_btn or f"hist_df_{section_id}" not in st.session_state:
-            if fetch_btn:
-                # Fetch multi-day history for selected row
-                row = rows[selected_idx] if selected_idx < len(rows) else rows[0]
-                frames = []
-                d = trade_date
-                collected = 0
+        if fetch_hist and rows:
+            row = rows[selected_idx] if selected_idx < len(rows) else rows[0]
+            frames = []
+            d = trade_date
+            collected = 0
+            with st.spinner(f"Loading {hist_days} history..."):
                 while collected < n_days:
                     if d.weekday() < 5:
                         df_d = get_spread_history(
@@ -477,9 +499,9 @@ def _render_section(
                             frames.append(df_d)
                         collected += 1
                     d -= timedelta(days=1)
-                st.session_state[f"hist_df_{section_id}"] = (
-                    pd.concat(frames[::-1], ignore_index=True) if frames else pd.DataFrame()
-                )
+            st.session_state[f"hist_df_{section_id}"] = (
+                pd.concat(frames[::-1], ignore_index=True) if frames else pd.DataFrame()
+            )
 
         df_hist = st.session_state.get(f"hist_df_{section_id}", pd.DataFrame())
         fig_hist = _build_historical_chart(df_hist, hist_days)
@@ -499,27 +521,28 @@ def render_tab():
     st.caption("Configure legs below. Click **Fetch Data** in each section to load spreads.")
 
     with st.expander("⚙️ Common Controls", expanded=True):
-        r1, r2, r3, r4 = st.columns(4)
-        with r1:
-            st.markdown("**First Leg**")
-            ex1  = st.selectbox("Exchange",   ["BSE","NSE"], index=0,  key="nfo_ex1")
-            und1 = st.selectbox("Index",      UNDERLYINGS.get(ex1,["SENSEX"]), key="nfo_und1")
-            exp1_list = get_expiries(ex1, und1)
-            exp1 = st.selectbox("Expiry",     exp1_list, key="nfo_exp1")
-        with r2:
-            st.markdown("**Second Leg**")
-            ex2  = st.selectbox("Exchange",   ["NSE","BSE"], index=0,  key="nfo_ex2")
-            und2 = st.selectbox("Index",      UNDERLYINGS.get(ex2,["NIFTY"]), key="nfo_und2")
-            exp2_list = get_expiries(ex2, und2)
-            exp2 = st.selectbox("Expiry",     exp2_list, key="nfo_exp2")
-        with r3:
-            st.markdown("**Date**")
-            trade_date = st.date_input("Date", value=date.today(),
-                                       max_value=date.today(), key="nfo_date")
-        with r4:
-            st.markdown(" ")
-            st.markdown("<br>", unsafe_allow_html=True)
-            st.caption(f"First: {ex1} {und1} | Second: {ex2} {und2}")
+        with st.form(key="nfo_common_form"):
+            r1, r2, r3, r4 = st.columns(4)
+            with r1:
+                st.markdown("**First Leg**")
+                ex1  = st.selectbox("Exchange",   ["BSE","NSE"], index=0,  key="nfo_ex1")
+                und1 = st.selectbox("Index",      UNDERLYINGS.get(ex1,["SENSEX"]), key="nfo_und1")
+                exp1_list = get_expiries(ex1, und1)
+                exp1 = st.selectbox("Expiry",     exp1_list, key="nfo_exp1")
+            with r2:
+                st.markdown("**Second Leg**")
+                ex2  = st.selectbox("Exchange",   ["NSE","BSE"], index=0,  key="nfo_ex2")
+                und2 = st.selectbox("Index",      UNDERLYINGS.get(ex2,["NIFTY"]), key="nfo_und2")
+                exp2_list = get_expiries(ex2, und2)
+                exp2 = st.selectbox("Expiry",     exp2_list, key="nfo_exp2")
+            with r3:
+                st.markdown("**Date**")
+                trade_date = st.date_input("Date", value=date.today(),
+                                           max_value=date.today(), key="nfo_date")
+            with r4:
+                st.markdown(" ")
+                st.markdown("<br>", unsafe_allow_html=True)
+                st.form_submit_button("✅ Apply Common Settings", use_container_width=True)
 
     st.markdown("---")
 
